@@ -4,15 +4,15 @@ from tkinter.ttk import *
 from tkinter import *
 import requests
 from login import extrauser
-import numpy as np
 import cv2 as cv
 from PIL import Image, ImageTk
-path = 'My+Movie+4.mov'
-video = cv.VideoCapture(path)
+from lane_overlay import LaneDetector, PROC_WIDTH
 
+VIDEO_PATH = 'input.mp4'
+LANE_DISPLAY_SIZE = (480, 270)
+RAW_DISPLAY_SIZE = (200, 113)
 
-video.set(cv.CAP_PROP_FRAME_WIDTH, 300)
-video.set(cv.CAP_PROP_FRAME_HEIGHT, 300)
+video = cv.VideoCapture(VIDEO_PATH)
 
 from datetime import datetime
 
@@ -27,6 +27,15 @@ def update_log_text():
         log_text.insert(tk.END, log_content)
         log_text.config(state=tk.DISABLED)
         log_text.yview(tk.END)  # scroll down to end!
+
+
+def show_frame(label, frame, size):
+    # converts an OpenCV frame into a tkinter image and puts it on the label
+    frame = cv.resize(frame, size)
+    opencv_image = cv.cvtColor(frame, cv.COLOR_BGR2RGBA)
+    photo_image = ImageTk.PhotoImage(image=Image.fromarray(opencv_image))
+    label.photo_image = photo_image
+    label.configure(image=photo_image)
 
 
 def movement(direction):
@@ -68,7 +77,7 @@ label_widget = tk.Label(fen)
 label_widget.grid(row=1)
 
 # Create a frame for the video feed
-left = tk.Frame(fen, bg="grey", width=300, height=300)
+left = tk.Frame(fen, bg="grey", width=500, height=300)
 left.pack_propagate(False)
 tk.Label(left, text="Line Detection", fg="white", bg="black", anchor="center", justify="center").pack()
 left.grid(column=0, row=0, pady=5, padx=10, sticky="n")
@@ -77,78 +86,30 @@ left.grid(column=0, row=0, pady=5, padx=10, sticky="n")
 video_label = tk.Label(left)
 video_label.pack()
 
-# masked line detection 
-region_top_left = (0, 250)  # Example values for top-left coordinate
-region_bottom_right = (640, 360)  # Example values for bottom-right coordinate
-
-
-video_path = 'My+Movie+4.mov'
-cap = cv.VideoCapture(video_path)
+# lane detection (see lane_overlay.py for the full pipeline)
+cap = cv.VideoCapture(VIDEO_PATH)
+frame_delay = int(1000 / (cap.get(cv.CAP_PROP_FPS) or 30))
+detector = None
 
 
 def update_video_feed():
+    global detector
     ret, frame = cap.read()
     if ret:
-        frame = cv.resize(frame, (640, 360))
-        region_of_interest = frame[region_top_left[1]:region_bottom_right[1], region_top_left[0]:region_bottom_right[0]]
-        gray_roi = cv.cvtColor(region_of_interest, cv.COLOR_BGR2GRAY)
-        roi_edges = cv.Canny(gray_roi, 50, 150)
-        lines = cv.HoughLinesP(roi_edges, 1, np.pi / 180, 50, minLineLength=30, maxLineGap=30)
-
-        if lines is not None:
-            left_points = []
-            right_points = []
-            for line in lines:
-                x1, y1, x2, y2 = line[0]
-                x1 += region_top_left[0]
-                y1 += region_top_left[1]
-                x2 += region_top_left[0]
-                y2 += region_top_left[1]
-
-                cv.line(frame, (x1, y1), (x2, y2), (0, 255, 0), thickness=2)
-
-                slope = (y2 - y1) / (x2 - x1) if (x2 - x1) != 0 else float('inf')
-                if slope < 0:  # Left line
-                    left_points.append((x1, y1))
-                    left_points.append((x2, y2))
-                elif slope > 0:  # Right line
-                    right_points.append((x1, y1))
-                    right_points.append((x2, y2))
-
-            left_x1 = left_x2 = 0
-            right_x1 = right_x2 = 0
-
-            if left_points:
-                left_line = cv.fitLine(np.array(left_points), cv.DIST_L2, 0, 0.01, 0.01)
-                vx, vy, x, y = left_line[0], left_line[1], left_line[2], left_line[3]
-                left_intercept = y - vy / vx * x
-                left_x1 = int((region_top_left[1] - left_intercept) / (vy / vx))
-                left_x2 = int((region_bottom_right[1] - left_intercept) / (vy / vx))
-                cv.line(frame, (left_x1, region_top_left[1]), (left_x2, region_bottom_right[1]), (0, 0, 255),
-                        thickness=2)
-
-            if right_points:
-                right_line = cv.fitLine(np.array(right_points), cv.DIST_L2, 0, 0.01, 0.01)
-                vx, vy, x, y = right_line[0], right_line[1], right_line[2], right_line[3]
-                right_intercept = y - vy / vx * x
-                right_x1 = int((region_top_left[1] - right_intercept) / (vy / vx))
-                right_x2 = int((region_bottom_right[1] - right_intercept) / (vy / vx))
-                cv.line(frame, (right_x1, region_top_left[1]), (right_x2, region_bottom_right[1]), (0, 0, 255),
-                        thickness=2)
-        arrow_start = (30, 30)
-        arrow_end = (30, 10)
-        cv.arrowedLine(frame, arrow_start, arrow_end, (255, 0, 0), thickness=2)
-
-        opencv_image = cv.cvtColor(frame, cv.COLOR_BGR2RGBA)
-        pil_image = Image.fromarray(opencv_image)
-        photo_image = ImageTk.PhotoImage(image=pil_image)
-
-        video_label.photo_image = photo_image
-        video_label.configure(image=photo_image)
+        h, w = frame.shape[:2]
+        frame = cv.resize(frame, (PROC_WIDTH, round(h * PROC_WIDTH / w)))
+        if detector is None:
+            detector = LaneDetector(frame.shape[1], frame.shape[0])
+        # traces the outer lane lines and draws the estimated center line
+        frame = detector.process(frame)
+        show_frame(video_label, frame, LANE_DISPLAY_SIZE)
     else:
-        print("Failed to retrieve frame from the video source.")
+        # restart the video when it ends
+        cap.set(cv.CAP_PROP_POS_FRAMES, 0)
+        if detector is not None:
+            detector.tracker.reset()
 
-    fen.after(10, update_video_feed)
+    fen.after(frame_delay, update_video_feed)
 
 update_video_feed()
 sty = Style(fen)
@@ -196,13 +157,12 @@ label_widget = Label(bleft)
 label_widget.pack()
 
 def open_cam():
-    _, frame = video.read()
-    opencv_image = cv.cvtColor(frame, cv.COLOR_BGR2RGBA)
-    captured_image = Image.fromarray(opencv_image)
-    photo_image = ImageTk.PhotoImage(image=captured_image)
-    label_widget.photo_image = photo_image
-    label_widget.configure(image=photo_image)
-    label_widget.after(10, open_cam)
+    ret, frame = video.read()
+    if ret:
+        show_frame(label_widget, frame, RAW_DISPLAY_SIZE)
+    else:
+        video.set(cv.CAP_PROP_POS_FRAMES, 0)
+    label_widget.after(frame_delay, open_cam)
 
 open_cam()
 
